@@ -20,8 +20,9 @@ Converts an IP address from human-readable text format into its binary represent
 #include <unistd.h>
 #define ARP_REQUEST 1
 #define ARP_REPLY 2
-
-int get_mac_address(const char *, unsigned char *); //For get Mac Address 
+unsigned char src_ip[INET_ADDRSTRLEN]={0};
+unsigned char src_mac[6]={0};
+int get_mac_address(); //For get Mac Address 
 
 struct arp_header {
     uint16_t hw_type;
@@ -35,11 +36,13 @@ struct arp_header {
     uint8_t target_ip[4];
 };
 // Function to get MAC address of a given interface
-int get_mac_address(unsigned char *ref_ip unsigned char *ref_mac) {   
+int get_mac_address() {   
     int fd;
     struct ifconf ifc;
     struct ifreq ifr[10];
     char ip[INET_ADDRSTRLEN];
+    unsigned char *mac;
+    int ifindex;
     // Create socket for ioctl
     fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
@@ -73,57 +76,54 @@ int get_mac_address(unsigned char *ref_ip unsigned char *ref_mac) {
             perror("ioctl SIOCGIFHWADDR");
             continue;
         }
-        unsigned char *mac = (unsigned char *)mac_req.ifr_hwaddr.sa_data;
+        
+        ifindex=ifr[i].ifr_ifindex;   //Ethernet index;
+        mac = (unsigned char *)mac_req.ifr_hwaddr.sa_data;
 
         printf("Interface: %s\n", ifr[i].ifr_name);
+        printf("INterface index: %d\n",ifindex);
         printf("IP Address: %s\n", ip);
         printf("MAC Address: %02x:%02x:%02x:%02x:%02x:%02x\n\n",
                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
         break; // Stop after first active interface
     }
 
-    memcpy(ref_mac, mac, 6); // Copy MAC address
-	memcpy(ref_ip,ip)
+    memcpy(src_ip,ip,INET_ADDRSTRLEN);
+    memcpy(src_mac, mac, 6); // Copy MAC address
     close(fd);
-    return 0;
+    return ifindex;
 }
 
 
-int main(int argc, char *argv[]) {          //take argument as inface name and destination IP
+int main(int argc, char *argv[]) {          //Take argument and Target IP
    char *target_ip_str = argv[1];
-   int client_fd;
-   struct sockaddr_ll dest;         //Used for Ethernet fream for L2  
-   
-   // Destination address for L2
-    struct ifreq ifr;
-    memset(&ifr, 0, sizeof(ifr));
-	int ifindex = ifr.ifr_ifindex;
-    memset(&dest, 0, sizeof(dest));
-    dest.sll_ifindex = ifindex;
-    dest.sll_halen = ETH_ALEN;
-    memset(dest.sll_addr, 0xff, 6);
+   struct sockaddr_ll dest;         //Used for Ethernet frame for L2  
+   int sockfd=socket(AF_PACKET,SOCK_RAW,htons(ETH_P_ARP));
+   if(sockfd<0){perror("ARP Socket");}
    
    // Prepare for ARP request  means interpret the beginning of a raw packet buffer as an Ethernet header.
     unsigned char buffer[42];
     struct ether_header *eth = (struct ether_header *)buffer;
 	struct arp_header *arp = (struct arp_header *)(buffer + sizeof(struct ether_header));
    /*[ Ethernet Header (14 bytes) ][ ARP Header (28 bytes) ]*/
-      // 1. Ethernet header
-           memset(eth->ether_dhost, 0xff, 6); //Destination MAC address field with FF FF FF FF FF FF(6 bytes). 
+   // 1. Ethernet header
+    memset(eth->ether_dhost, 0xff, 6); //Destination MAC address field with FF FF FF FF FF FF(6 bytes). 
       
-     	  /* Get Sorce mac address so we used in Ethernet header*/		   
-          unsigned char src_mac[6];
-		  unsigned char src_ip[4];
-          if (get_mac_address(src_ip, src_mac) == 0) {
+     	  /* Get Sorce Mac/IP/Ethernet Index address so we used in Ethernet header*/	
+          int ifindex = get_mac_address();
+          if (ifindex > 1) {
                printf("MAC Address: %02x:%02x:%02x:%02x:%02x:%02x\n",
                src_mac[0], src_mac[1], src_mac[2], src_mac[3], src_mac[4], src_mac[5]);
 			   printf("IP Address of source:%s\n",src_ip);
               }
 			  else { printf("Failed to get MAC address\n"); }
-	     /* Done Got source Mac */		  
-
-           memcpy(eth->ether_shost, src_mac, 6); 
-           eth->ether_type = htons(ETH_P_ARP);
+	     /* Done Got source Mac */		          
+     memset(&dest, 0, sizeof(dest));
+     dest.sll_ifindex = ifindex;
+     dest.sll_halen = ETH_ALEN;
+     memset(dest.sll_addr, 0xff, 6);
+     memcpy(eth->ether_shost, src_mac, 6); 
+     eth->ether_type = htons(ETH_P_ARP);
 		   
      // 2. ARP header 
     arp->hw_type = htons(1);
@@ -135,7 +135,6 @@ int main(int argc, char *argv[]) {          //take argument as inface name and d
     memcpy(arp->sender_ip, src_ip, 4);
     memset(arp->target_mac, 0x00, 6);
     inet_pton(AF_INET, target_ip_str, arp->target_ip);	//Converts IP address from text format to network byte order binary format.	  
-
      // Send ARP request using IPC socket
     if (sendto(sockfd, buffer, 42, 0, (struct sockaddr *)&dest, sizeof(dest)) < 0) //Used with connectionless sockets (like UDP) or raw sockets.Used with connectionless sockets (like UDP) or raw sockets.
 	{
@@ -162,6 +161,6 @@ int main(int argc, char *argv[]) {          //take argument as inface name and d
         }
     }
 	
-   close(client_fd);
+   close(sockfd);
    return 0;
 }
